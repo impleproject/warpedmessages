@@ -1,90 +1,92 @@
-from flask import Flask, render_template, redirect, url_for, request, flash, session
+from flask import Flask, render_template, redirect, url_for, request, session, flash
+from flask_sqlalchemy import SQLAlchemy
+from flask_bcrypt import Bcrypt
+from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
 from flask_wtf import FlaskForm
-from wtforms import StringField, PasswordField
-from wtforms.validators import DataRequired, Email, Length
+from wtforms import StringField, PasswordField, SubmitField
+from wtforms.validators import InputRequired, Length, EqualTo, ValidationError
 
-# Inicjalizacja aplikacji Flask
 app = Flask(__name__)
-app.secret_key = 'supersecretkey'  # Klucz do sesji (w produkcji zmień na coś bardziej skomplikowanego)
+app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///database.db"  # Plik bazy danych
+app.config["SECRET_KEY"] = "supersecretkey"  # Klucz sesji (zmień go!)
+db = SQLAlchemy(app)
+bcrypt = Bcrypt(app)
+login_manager = LoginManager(app)
+login_manager.login_view = "login"
 
-# Prosty "baza danych" dla użytkowników
-users = {}
+# Model użytkownika
+class User(db.Model, UserMixin):
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(50), unique=True, nullable=False)
+    password = db.Column(db.String(100), nullable=False)
 
 # Formularz rejestracji
-class RegistrationForm(FlaskForm):
-    email = StringField('Email', validators=[DataRequired(), Email()])
-    username = StringField('Username', validators=[DataRequired(), Length(min=4, max=32)])
-    password = PasswordField('Password', validators=[DataRequired(), Length(min=6, max=64)])
+class RegisterForm(FlaskForm):
+    username = StringField("Nazwa użytkownika", validators=[InputRequired(), Length(min=4, max=20)])
+    password = PasswordField("Hasło", validators=[InputRequired(), Length(min=6, max=20)])
+    confirm_password = PasswordField("Potwierdź hasło", validators=[InputRequired(), EqualTo("password")])
+    submit = SubmitField("Zarejestruj się")
+
+    # Sprawdzamy, czy nazwa użytkownika jest unikalna
+    def validate_username(self, username):
+        user = User.query.filter_by(username=username.data).first()
+        if user:
+            raise ValidationError("Ta nazwa użytkownika jest już zajęta!")
 
 # Formularz logowania
 class LoginForm(FlaskForm):
-    username = StringField('Username', validators=[DataRequired(), Length(min=4, max=32)])
-    password = PasswordField('Password', validators=[DataRequired(), Length(min=6, max=64)])
+    username = StringField("Nazwa użytkownika", validators=[InputRequired(), Length(min=4, max=20)])
+    password = PasswordField("Hasło", validators=[InputRequired(), Length(min=6, max=20)])
+    submit = SubmitField("Zaloguj się")
 
-@app.route('/')
+@login_manager.user_loader
+def load_user(user_id):
+    return User.query.get(int(user_id))
+
+# Tworzenie bazy
+with app.app_context():
+    db.create_all()
+
+@app.route("/")
 def home():
-    form = LoginForm()
+    return render_template("index.html")
 
-    # Jeśli użytkownik jest zalogowany, przekieruj go na stronę powitalną
-    if 'username' in session:
-        return redirect(url_for('welcome'))
-
-    return render_template('login.html', form=form)
-
-@app.route('/register', methods=['GET', 'POST'])
+@app.route("/register", methods=["GET", "POST"])
 def register():
-    form = RegistrationForm()
-
+    form = RegisterForm()
     if form.validate_on_submit():
-        email = form.email.data
-        username = form.username.data
-        password = form.password.data
+        hashed_password = bcrypt.generate_password_hash(form.password.data).decode("utf-8")
+        new_user = User(username=form.username.data, password=hashed_password)
+        db.session.add(new_user)
+        db.session.commit()
+        flash("Konto utworzone! Możesz się zalogować.", "success")
+        return redirect(url_for("login"))
+    return render_template("register.html", form=form)
 
-        # Sprawdzamy, czy użytkownik już istnieje
-        if username in users:
-            flash('Username already exists!', 'danger')
-            return redirect(url_for('register'))
-
-        # Dodajemy użytkownika do naszej "bazy danych"
-        users[username] = {'email': email, 'password': password}
-        flash('Account created successfully! You can now log in.', 'success')
-        return redirect(url_for('home'))
-
-    return render_template('register.html', form=form)
-
-@app.route('/login', methods=['POST'])
+@app.route("/login", methods=["GET", "POST"])
 def login():
     form = LoginForm()
-
     if form.validate_on_submit():
-        username = form.username.data
-        password = form.password.data
-
-        # Sprawdzamy, czy użytkownik istnieje i czy hasło jest poprawne
-        if username in users and users[username]['password'] == password:
-            session['username'] = username
-            flash('You have logged in successfully!', 'success')
-            return redirect(url_for('welcome'))
+        user = User.query.filter_by(username=form.username.data).first()
+        if user and bcrypt.check_password_hash(user.password, form.password.data):
+            login_user(user)
+            flash("Zalogowano pomyślnie!", "success")
+            return redirect(url_for("dashboard"))
         else:
-            flash('Invalid credentials, please try again.', 'danger')
+            flash("Niepoprawne dane logowania", "danger")
+    return render_template("login.html", form=form)
 
-    return redirect(url_for('home'))
+@app.route("/dashboard")
+@login_required
+def dashboard():
+    return f"Witaj {current_user.username}! To twoja strona główna."
 
-@app.route('/welcome')
-def welcome():
-    # Jeśli użytkownik nie jest zalogowany, przekieruj go na stronę logowania
-    if 'username' not in session:
-        return redirect(url_for('home'))
-
-    username = session['username']
-    return f'Welcome {username}! You are logged in.'
-
-@app.route('/logout')
+@app.route("/logout")
+@login_required
 def logout():
-    # Usuwamy użytkownika z sesji
-    session.pop('username', None)
-    flash('You have been logged out.', 'info')
-    return redirect(url_for('home'))
+    logout_user()
+    flash("Wylogowano!", "info")
+    return redirect(url_for("login"))
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     app.run(debug=True)
